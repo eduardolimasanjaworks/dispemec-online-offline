@@ -1,0 +1,6 @@
+/* CSS Reset - Styles moved to App.css to avoid conflicts */
+body {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}

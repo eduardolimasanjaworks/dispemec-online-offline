@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tab Monitor Telemetry Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', monospace;
+            padding: 20px;
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        #status-box {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            margin: 10px 0;
+        }
+
+        #log {
+            height: 300px;
+            overflow-y: auto;
+            background: #222;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin: 4px 0;
+            border-bottom: 1px solid #333;
+        }
+
+        .timestamp {
+            color: #888;
+            margin-right: 8px;
+        }
+
+        .event-type {
+            color: #0ff;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        /* Alert Styles */
+        .alert-box {
+            background: #ffebee;
+            border: 1px solid #ffcdd2;
+            color: #b71c1c;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+            margin-bottom: 10px;
+        }
+
+        /* Views */
+        #dashboard-view {
+            display: none;
+        }
+
+        #login-view {
+            max-width: 400px;
+            margin: 50px auto;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            box-sizing: border-box;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button#toggle-tracking {
+            background: #dc3545;
+        }
+
+        button#toggle-tracking:hover {
+            background: #a71d2a;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- LOGIN SCREEN -->
+    <div id="login-view" class="card">
+        <h2>🔐 Login</h2>
+        <p>Enter your username to start the session.</p>
+        <form id="login-form">
+            <input type="text" id="username" placeholder="Username (e.g. alice)" required>
+            <button type="submit">Enter Dashboard</button>
+        </form>
+    </div>
+
+    <!-- DASHBOARD SCREEN -->
+    <div id="dashboard-view">
+        <div id="security-alert" class="alert-box">
+            ⚠️ <strong>Security Alert:</strong> <span id="alert-msg"></span>
+        </div>
+
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h1>🔭 Dashboard</h1>
+                <div style="text-align:right">
+                    <small>User (Usuário): <b id="user-display"></b></small><br>
+                    <small>Tab (Aba): <span id="tab-id-display">...</span></small><br>
+                    <button id="btn-logout"
+                        style="margin-top: 5px; padding: 4px 8px; font-size: 12px; background: #666;">🚪 Logout
+                        (Sair)</button>
+                </div>
+            </div>
+
+            <p>Current State:</p>
+            <div id="status-box">INITIALIZING...</div>
+
+
+            <div id="queue-status" style="margin-top: 10px; color: #d32f2f; font-weight: bold; display: none;">
+                📡 OFFLINE: <span id="queue-count">0</span> events saved locally (eventos salvos localmente)
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Telemetry Log</h3>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script src="tab-monitor.js"></script>
+    <script>
+        // --- CONFIG ---
+        const API_URL = '/api/telemetry';
+        const LOGIN_URL = '/api/login';
+        const LOGOUT_URL = '/api/logout';
+
+        let currentUser = null;
+        let monitor = null;
+
+        // --- LOGIN LOGIC ---
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+
+            try {
+                const res = await fetch(LOGIN_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    currentUser = data;
+                    initDashboard();
+                }
+            } catch (err) {
+                alert("Login failed");
+                console.error(err);
+            }
+        });
+
+        // --- DASHBOARD LOGIC ---
+        function initDashboard() {
+            // Switch Views
+            document.getElementById('login-view').style.display = 'none';
+            document.getElementById('dashboard-view').style.display = 'block';
+            document.getElementById('user-display').innerText = currentUser.username;
+
+            // Initialize Monitor (BUT DO NOT START YET)
+            monitor = new TabMonitor({
+                endpoint: API_URL,
+                tabId: crypto.randomUUID(),
+                debug: true
+            });
+            // monitor.start() removed from here. Will be called by button.
+
+            // Enable Admin View if user is admin
+            if (currentUser.username === 'admin') {
+                document.getElementById('admin-section').style.display = 'block';
+                startAdminPoller();
+            }
+
+            // Patch Report Method to INJECT USER ID and HANDLE UI
+            const originalReport = monitor._sendBeacon.bind(monitor);
+
+            monitor._sendBeacon = (payload) => {
+                // 1. Inject User ID (Frontend enrichment)
+                // In prod, you might prefer cookies, but for this explicit payload:
+                payload.userId = currentUser.userId;
+
+                // 2. Update Local UI
+                if (payload.state) {
+                    updateStatusBox(payload.state);
+                }
+                uiLog(payload);
+
+                // 3. Send (and handle response for Security Alerts if using fetch fallback)
+                // Note: sendBeacon doesn't give response. 
+                // We'll use a parallel fetch check for alerts occasionally or rely on the heartbeat fallback logic
+                // For this demo, let's force FETCH for heartbeat to get the response data
+                if (payload.type === 'heartbeat' || payload.type === 'init') {
+                    fetch(monitor.config.endpoint, {
+                        method: 'POST',
+                        body: JSON.stringify({ ...payload, tabId: monitor.config.tabId }),
+                        headers: { 'Content-Type': 'application/json' },
+                        keepalive: true
+                    })
+                        .then(r => r.json())
+                        .then(serverData => {
+                            handleServerResponse(serverData);
+                        })
+                        .catch(e => console.error("Telemetry fetch error", e));
+                } else {
+                    // Use standard beacon for events
+                    originalReport(payload);
+                }
+            };
+
+            // document.getElementById('tab-id-display').innerText = monitor.config.tabId;
+            // monitor.start();  <-- REMOVED. Now manual.
+
+            setupToggle();
+
+            // --- LOGOUT LOGIC ---
+            document.getElementById('btn-logout').onclick = async () => {
+                try {
+                    // 1. Notify Server
+                    await fetch(LOGOUT_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            userId: currentUser.userId,
+                            tabId: monitor.config.tabId
+                        })
+                    });
+                } catch (e) { console.error("Logout error", e); } // Proceed anyway
+
+                // 2. Kill Monitor
+                monitor.stop();
+                monitor = null;
+                currentUser = null;
+
+                // 3. Reset UI
+                document.getElementById('dashboard-view').style.display = 'none';
+                document.getElementById('login-view').style.display = 'block';
+                document.getElementById('username').value = '';
+                document.getElementById('log').innerHTML = ''; // Clear logs
+            };
+        }
+
+        function handleServerResponse(data) {
+            const alertBox = document.getElementById('security-alert');
+            if (data.securityAlert) {
+                alertBox.style.display = 'block';
+                document.getElementById('alert-msg').innerText = data.securityAlert;
+            } else {
+                alertBox.style.display = 'none';
+            }
+        }
+
+        function updateStatusBox(state) {
+            const box = document.getElementById('status-box');
+            box.innerText = state;
+            if (state.includes('FOCUSED')) box.style.color = '#00aa00';
+            else if (state.includes('VISIBLE')) box.style.color = '#aa5500';
+            else if (state.includes('HIDDEN')) box.style.color = '#aa0000';
+            else box.style.color = '#333';
+        }
+
+        function uiLog(data) {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const date = new Date(data.timestamp).toISOString().split('T')[1].slice(0, -1);
+            entry.innerHTML = `<span class="timestamp">[${date}]</span> <span class="event-type">${data.type}</span> ${data.state || ''}`;
+            log.prepend(entry);
+        }
+
+        // --- MAIN BUTTON LOGIC (Single Source of Truth) ---
+        function setupToggle() {
+            const btn = document.getElementById('btn-main-action');
+            let isOnline = false;
+
+            btn.addEventListener('click', () => {
+                const box = document.getElementById('status-box');
+
+                if (!isOnline) {
+                    // GOING ONLINE involves 3 steps:
+                    // 1. Enable Sound (KeepAlive) - Must be first due to browser policy
+                    monitor.enableKeepAlive();
+
+                    // 2. Start Monitor
+                    monitor.start();
+
+                    // 3. Update UI
+                    isOnline = true;
+                    btn.innerHTML = "🔴 FICAR OFFLINE (PARAR)";
+                    btn.style.background = "#dc3545"; // Red
+                    btn.style.boxShadow = "0 4px 15px rgba(220, 53, 69, 0.4)";
+
+                    box.innerText = "ONLINE - AGUARDANDO STATUS...";
+                } else {
+                    // GOING OFFLINE
+                    monitor._reportEvent('manual_disconnect', 'USER_WENT_OFFLINE', { userId: currentUser.userId });
+                    monitor.stop();
+                    monitor.disableKeepAlive();
+
+                    isOnline = false;
+                    btn.innerHTML = "🛡️ INICIAR PLANTÃO (ONLINE)";
+                    btn.style.background = "#28a745"; // Green
+                    btn.style.boxShadow = "0 4px 15px rgba(40, 167, 69, 0.4)";
+
+                    box.innerText = "OFFLINE (MONITOR PARADO)";
+                    box.style.color = "#999";
+                    document.getElementById("security-alert").style.display = "none";
+                }
+            });
+        }
+
+        // --- ADMIN FUNC ---
+        async function startAdminPoller() {
+            if (currentUser.username !== 'admin') return;
+
+            try {
+                const res = await fetch('/api/admin/users');
+                const users = await res.json();
+
+                let html = '<table style="width:100%; border-collapse:collapse;">';
+                html += '<tr style="text-align:left; background:#eee;"><th>User</th><th>Tabs</th><th>IPs</th><th>Last State</th><th>Last Seen</th></tr>';
+
+                // Convert Map-like object to array
+                for (const [uid, userSessions] of Object.entries(users)) {
+                    // userSessions is { tabId: { ... } }
+                    for (const [tid, info] of Object.entries(userSessions)) {
+                        const date = new Date(info.lastSeen).toLocaleTimeString();
+                        const stateColor = info.state.includes('FOCUSED') ? 'green' : (info.state.includes('VISIBLE') ? 'orange' : 'red');
+
+                        html += `<tr style="border-bottom:1px solid #ddd;">
+                            <td>${uid.slice(0, 6)}..</td>
+                            <td>${tid.slice(0, 4)}..</td>
+                            <td>${info.ip}</td>
+                            <td style="color:${stateColor}; font-weight:bold;">${info.state}</td>
+                            <td>${date}</td>
+                         </tr>`;
+                    }
+                }
+                html += '</table>';
+
+                document.getElementById('admin-users-list').innerHTML = html;
+            } catch (e) {
+                console.error("Admin fetch failed", e);
+            }
+        }
+
+        // --- Queue UI Logic ---
+        window.addEventListener('telemetry-queue-updated', (e) => {
+            const count = e.detail;
+            const el = document.getElementById('queue-status');
+            const countEl = document.getElementById('queue-count');
+
+            if (count > 0) {
+                el.style.display = 'block';
+                countEl.innerText = count;
+            } else {
+                el.style.display = 'none';
+            }
+        });
+
+    </script>
+</body>
+
+</html>

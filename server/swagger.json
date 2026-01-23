@@ -1,0 +1,83 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Status API",
+    "version": "1.0.0",
+    "description": "Documentação mínima em Português para consultar status de atendentes"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3001"
+    }
+  ],
+  "paths": {
+    "/api/admin/users": {
+      "get": {
+        "summary": "Obter status de todos os atendentes",
+        "responses": {
+          "200": {
+            "description": "Lista de atendentes com status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "userId": { "type": "string" },
+                      "tabCount": { "type": "integer" },
+                      "distinctIps": { "type": "integer" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{userId}/status": {
+      "get": {
+        "summary": "Obter status de um atendente específico",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Identificador do usuário"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status do usuário",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": { "type": "string" },
+                    "status": { "type": "string", "enum": ["offline", "online", "active"] },
+                    "activeTabs": { "type": "integer" },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": { "type": "string" },
+                          "state": { "type": "string" },
+                          "lastSeen": { "type": "string", "format": "date-time" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "description": "Usuário não encontrado" }
+        }
+      }
+    }
+  }
+}
