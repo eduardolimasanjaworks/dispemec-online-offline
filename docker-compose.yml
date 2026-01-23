@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: telemetry_backend
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DOC_TOKEN=public
+    volumes:
+      - ./server/data:/app/data
+      - db_data:/app/database # For the sqlite file
+    networks:
+      - telemetry_network
+
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: telemetry_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - telemetry_network
+
+networks:
+  telemetry_network:
+    driver: bridge
+
+volumes:
+  db_data:

@@ -26,17 +26,19 @@ npm install
 node index.js
 ```
 
-O servidor estará rodando em `http://localhost:3001`
+### Docker (Produção)
 
-### Frontend (Cliente)
+Para subir o ambiente completo com auto-restart e persistência de dados:
 
 ```bash
-cd client
-npm install
-npm run dev
+docker-compose up -d --build
 ```
 
-O cliente estará rodando em `http://localhost:5173`
+- Frontend: `http://localhost` (Porta 80)
+- Backend: `http://localhost:3001`
+- Swagger: `http://localhost:3001/api-docs?token=public`
+
+O Docker Compose está configurado com `restart: always`, garantindo que se o sistema cair ou o servidor reiniciar, os containers subirão automaticamente.
 
 ## 🔐 Credenciais Padrão
 
