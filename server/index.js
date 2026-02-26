@@ -30,7 +30,7 @@ const io = new Server(server, {
     }
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 8090;
 
 // Debug Middleware
 app.use((req, res, next) => {
@@ -446,6 +446,14 @@ function docsAuth(req, res, next) {
 app.use('/api-docs', swaggerUi.serve);
 app.get('/api-docs', docsAuth, swaggerUi.setup(swaggerSpec));
 
+// Serve React Frontend
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Catch-all for SPA: must be the LAST route
+app.use((req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 server.listen(PORT, () => {
-    console.log(`🚀 Persistent Server (Directus backend) running on port ${PORT}`);
+    console.log(`🚀 Persistent Server (Directus backend + React Frontend) running on port ${PORT}`);
 });

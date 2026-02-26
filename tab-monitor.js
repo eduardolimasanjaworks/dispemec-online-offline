@@ -39,7 +39,9 @@
             this.config = { ...DEFAULTS, ...config };
 
             if (!this.config.tabId) {
-                this.config.tabId = crypto.randomUUID();
+                this.config.tabId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                    ? crypto.randomUUID()
+                    : this._generateFallbackUUID();
             }
 
             this.state = this._determineState();
@@ -163,6 +165,14 @@
                 this.state = newState;
                 this._reportEvent('state_change', newState);
             }
+        }
+
+        _generateFallbackUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
         }
 
         _reportEvent(type, state, extraData = {}) {
