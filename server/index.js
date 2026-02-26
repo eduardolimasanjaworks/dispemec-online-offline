@@ -4,11 +4,21 @@ const { Server } = require("socket.io");
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
-const { Sequelize, DataTypes, Op } = require('sequelize');
-
 const path = require('path');
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
+
+// Directus SDK
+const { createDirectus, rest, staticToken, createItem, readItem, readItems, updateItem, deleteItem } = require('@directus/sdk');
+
+// Variáveis de ambiente
+const DIRECTUS_URL = process.env.DIRECTUS_URL || "http://91.99.137.101:8056/";
+const DIRECTUS_TOKEN = process.env.DIRECTUS_TOKEN || "UuazE-Np-VrpGxmqe-bEpysiTSjV8_YR";
+
+const directus = createDirectus(DIRECTUS_URL)
+    .with(staticToken(DIRECTUS_TOKEN))
+    .with(rest());
+
 // --- APP SETUP ---
 const app = express();
 const server = http.createServer(app);
@@ -20,7 +30,7 @@ const io = new Server(server, {
     }
 });
 
-const PORT = 3001; // Port 3001 for API
+const PORT = 3001;
 
 // Debug Middleware
 app.use((req, res, next) => {
@@ -28,163 +38,161 @@ app.use((req, res, next) => {
     next();
 });
 
-// CORS Middleware for Express Routes
-// CORS Middleware for Express Routes
+// CORS Middleware
 app.use(cors({
-    origin: true, // Allow any origin that sends the request
+    origin: true,
     credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json({ type: ['application/json', 'text/plain'] }));
 
-// --- DATABASE SETUP (SQLite Persistent) ---
-const sequelize = new Sequelize({
-    dialect: 'sqlite',
-    storage: './telemetry.sqlite',
-    logging: false
-});
 
-// Models
-// Models
-const User = sequelize.define('User', {
-    id: { type: DataTypes.STRING, primaryKey: true }, // generated UUID or hash
-    username: { type: DataTypes.STRING, unique: true },
-    password: { type: DataTypes.STRING }, // Hash
-    salt: { type: DataTypes.STRING },
-    isAdmin: { type: DataTypes.BOOLEAN, defaultValue: false },
-    lastLogin: { type: DataTypes.DATE }
-}, {
-    timestamps: true,
-    paranoid: true // soft delete (deletedAt)
-});
-
-const Session = sequelize.define('Session', {
-    tabId: { type: DataTypes.UUID, primaryKey: true },
-    userId: { type: DataTypes.STRING, allowNull: false },
-    // We add username snapshot here just in case, or link to User.
-    // Ideally we link to User.
-    username: { type: DataTypes.STRING }, // Snapshot for quick access
-    ip: { type: DataTypes.STRING },
-    state: { type: DataTypes.STRING }, // FOCUSED, HIDDEN, etc
-    lastSeen: { type: DataTypes.DATE },
-    deviceType: { type: DataTypes.STRING },
-    userAgent: { type: DataTypes.STRING },
-    startedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
-});
-
-const TelemetryLog = sequelize.define('TelemetryLog', {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    userId: { type: DataTypes.STRING },
-    tabId: { type: DataTypes.UUID },
-    state: { type: DataTypes.STRING },
-    eventType: { type: DataTypes.STRING },
-    timestamp: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
-});
-
-// Associations
-TelemetryLog.belongsTo(User, { foreignKey: 'userId' });
-User.hasMany(TelemetryLog, { foreignKey: 'userId' });
-Session.belongsTo(User, { foreignKey: 'userId' });
-User.hasMany(Session, { foreignKey: 'userId' });
-
-// Sync DB
-const ADMIN_PASSWORD = "SuperAdminStrongPassword2026!"; // Hardcoded strong password as requested
-
-async function initDB() {
-    await sequelize.sync({ alter: true }); // Update tables
-    console.log('📦 Database Connected & Synced (SQLite)');
-
-    // Init Admin
-    const adminExists = await User.findOne({ where: { username: 'admin' } });
-    if (!adminExists) {
-        const salt = crypto.randomBytes(16).toString('hex');
-        const hash = crypto.scryptSync(ADMIN_PASSWORD, salt, 64).toString('hex');
-        const adminId = crypto.randomUUID();
-
-        await User.create({
-            id: adminId,
-            username: 'admin',
-            password: hash,
-            salt: salt,
-            isAdmin: true
-        });
-        console.log(`🔐 Admin Account Created.`);
-        console.log(`👤 User: admin`);
-        console.log(`🔑 Pass: ${ADMIN_PASSWORD}`);
-    }
-}
-initDB();
+const ADMIN_PASSWORD = "SuperAdminStrongPassword2026!";
 
 // --- AUTH HELPERS ---
 function hashPassword(password, salt) {
     return crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
+async function initDB() {
+    console.log('📦 Conectado ao Directus SDK');
+    try {
+        const admins = await directus.request(readItems('Telemetry_Users', {
+            filter: { username: { _eq: 'admin' } }
+        }));
+
+        if (admins.length === 0) {
+            const salt = crypto.randomBytes(16).toString('hex');
+            const hash = hashPassword(ADMIN_PASSWORD, salt);
+            const adminId = crypto.randomUUID();
+
+            await directus.request(createItem('Telemetry_Users', {
+                id: adminId,
+                username: 'admin',
+                password: hash,
+                salt: salt,
+                isAdmin: true
+            }));
+            console.log(`🔐 Admin Account Created nas coleções do Directus.`);
+            console.log(`👤 User: admin`);
+            console.log(`🔑 Pass: ${ADMIN_PASSWORD}`);
+        }
+    } catch (e) {
+        console.error("Erro ao verificar/criar Admin inicial no Directus:", e.errors || e.message);
+    }
+}
+initDB();
+
 // --- SERVICE LAYER ---
 class SessionStore {
     async upsertSession(userId, tabId, data) {
+        let username = 'Unknown';
+        try {
+            const user = await directus.request(readItem('Telemetry_Users', userId));
+            if (user) username = user.username;
+        } catch (e) { }
 
-        // 1. Upsert Current Session
-        // Fetch User to get Username
-        const user = await User.findByPk(userId);
-        const username = user ? user.username : 'Unknown';
-
-        await Session.upsert({
+        const sessionData = {
             tabId,
             userId,
-            username, // Save snapshot
-            ...data,
-            lastSeen: new Date()
-        });
+            username,
+            ip: data.ip || null,
+            state: data.state || null,
+            lastSeen: new Date().toISOString()
+        };
 
-        // 2. Gravando Histórico (Apenas mudanças relevantes ou init/shutdown ou periodic_log)
-        // Para não flodar o banco, vamos gravar apenas se o tipo for state_change, init/shutdown ou periodic_log
+        try {
+            try {
+                // Tenta atualizar a sessão existente
+                await directus.request(updateItem('Telemetry_Sessions', tabId, sessionData));
+            } catch (e) {
+                // Se falhar, ela não existe, logo, cria
+                await directus.request(createItem('Telemetry_Sessions', sessionData));
+            }
+        } catch (e) {
+            console.error("Erro upsertSession:", e.errors || e.message);
+        }
+
         if (['state_change', 'init', 'shutdown', 'periodic_log', 'manual_disconnect'].includes(data.type)) {
-            await TelemetryLog.create({
-                userId,
-                tabId,
-                state: data.state,
-                eventType: data.type
-            });
+            try {
+                await directus.request(createItem('Telemetry_Logs', {
+                    userId,
+                    tabId,
+                    state: data.state,
+                    eventType: data.type
+                }));
+            } catch (e) {
+                console.error("Erro ao gravar log:", e.errors || e.message);
+            }
         }
 
         return this.getUserStats(userId);
     }
 
     async removeSession(userId, tabId) {
-        await Session.destroy({ where: { userId, tabId } });
+        try {
+            await directus.request(deleteItem('Telemetry_Sessions', tabId));
+        } catch (e) { }
     }
 
     async pruneDeadSessions() {
-        const cutoff = new Date(Date.now() - 30000); // 30s timeout
-        const deleted = await Session.destroy({
-            where: { lastSeen: { [Op.lt]: cutoff } }
-        });
-        if (deleted > 0) console.log(`🧹 Pruned ${deleted} zombie sessions`);
+        const cutoff = new Date(Date.now() - 30000).toISOString();
+        try {
+            const deadSessions = await directus.request(readItems('Telemetry_Sessions', {
+                filter: { lastSeen: { _lt: cutoff } }
+            }));
+
+            if (deadSessions.length > 0) {
+                for (let session of deadSessions) {
+                    try {
+                        await directus.request(deleteItem('Telemetry_Sessions', session.tabId));
+                    } catch (ex) { }
+                }
+                console.log(`🧹 Pruned ${deadSessions.length} zombie sessions do Directus`);
+            }
+        } catch (e) { }
     }
 
     async getAllSessions() {
-        const sessions = await Session.findAll();
-        const result = {};
-        for (const s of sessions) {
-            if (!result[s.userId]) result[s.userId] = {};
-            result[s.userId][s.tabId] = s.toJSON();
+        try {
+            const sessions = await directus.request(readItems('Telemetry_Sessions', { limit: -1 }));
+            const result = {};
+            for (const s of sessions) {
+                if (!result[s.userId]) result[s.userId] = {};
+                result[s.userId][s.tabId] = s;
+            }
+            return result;
+        } catch (e) {
+            return {};
         }
-        return result;
     }
 
     async getUserStats(userId) {
-        const tabs = await Session.findAll({ where: { userId } });
-        const ips = new Set(tabs.map(t => t.ip));
-        const username = tabs.length > 0 ? tabs[0].username : (await User.findByPk(userId))?.username || 'Unknown';
+        try {
+            const tabs = await directus.request(readItems('Telemetry_Sessions', {
+                filter: { userId: { _eq: userId } }
+            }));
+            const ips = new Set(tabs.map(t => t.ip).filter(Boolean));
+            let username = 'Unknown';
+            if (tabs.length > 0 && tabs[0].username) {
+                username = tabs[0].username;
+            } else {
+                try {
+                    const user = await directus.request(readItem('Telemetry_Users', userId));
+                    if (user) username = user.username;
+                } catch (e) { }
+            }
 
-        return {
-            userId,
-            username,
-            tabCount: tabs.length,
-            distinctIps: ips.size
-        };
+            return {
+                userId,
+                username,
+                tabCount: tabs.length,
+                distinctIps: ips.size
+            };
+        } catch (e) {
+            return { userId, username: 'Unknown', tabCount: 0, distinctIps: 0 };
+        }
     }
 }
 
@@ -216,19 +224,19 @@ io.on('connection', (socket) => {
 
 // --- API ROUTES ---
 
-// Login
-// Login
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
 
     try {
-        const user = await User.findOne({ where: { username } });
+        const users = await directus.request(readItems('Telemetry_Users', {
+            filter: { username: { _eq: username } }
+        }));
 
-        if (!user) {
+        if (users.length === 0) {
             return res.status(401).json({ success: false, error: "Usuário não encontrado." });
         }
+        const user = users[0];
 
-        // Verify Password if set
         if (user.password) {
             if (!password) {
                 return res.status(401).json({ success: false, error: "Senha necessária." });
@@ -239,9 +247,9 @@ app.post('/api/auth/login', async (req, res) => {
             }
         }
 
-        // Update Last Login
-        user.lastLogin = new Date();
-        await user.save();
+        await directus.request(updateItem('Telemetry_Users', user.id, {
+            lastLogin: new Date().toISOString()
+        }));
 
         res.json({
             success: true,
@@ -260,19 +268,20 @@ app.post('/api/auth/login', async (req, res) => {
 
 // --- ADMIN CREDENTIALS CRUD ---
 
-// List Users
 app.get('/api/admin/credentials', async (req, res) => {
     try {
-        const users = await User.findAll({
-            attributes: ['id', 'username', 'isAdmin', 'lastLogin', 'createdAt']
-        });
-        res.json(users);
+        const users = await directus.request(readItems('Telemetry_Users', {
+            fields: ['id', 'username', 'isAdmin', 'lastLogin']
+        }));
+
+        // Simular o createdAt da versão sequelize lendo dados criados ou map (evitar quebrar front)
+        const formatUsers = users.map(u => ({ ...u, createdAt: u.lastLogin || new Date().toISOString() }));
+        res.json(formatUsers);
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// Create User
 app.post('/api/admin/credentials', async (req, res) => {
     const { username, password, isAdmin } = req.body;
     try {
@@ -280,83 +289,71 @@ app.post('/api/admin/credentials', async (req, res) => {
         const hash = hashPassword(password, salt);
         const id = crypto.randomUUID();
 
-        const newUser = await User.create({
+        const newUser = await directus.request(createItem('Telemetry_Users', {
             id,
             username,
             password: hash,
             salt,
             isAdmin: !!isAdmin
-        });
+        }));
 
         res.json({ success: true, user: { id: newUser.id, username: newUser.username } });
     } catch (e) {
-        res.status(500).json({ error: "Erro ao criar usuário. Nome duplicado?" });
+        res.status(500).json({ error: "Erro ao criar usuário. Nome duplicado ou banco indisponível." });
     }
 });
 
-// Reset Password / Update
 app.put('/api/admin/credentials/:id', async (req, res) => {
     const { id } = req.params;
     const { password, isAdmin } = req.body;
 
     try {
-        const user = await User.findByPk(id);
-        if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
-
+        let updateData = {};
         if (password) {
-            user.salt = crypto.randomBytes(16).toString('hex');
-            user.password = hashPassword(password, user.salt);
+            const salt = crypto.randomBytes(16).toString('hex');
+            updateData.salt = salt;
+            updateData.password = hashPassword(password, salt);
         }
         if (isAdmin !== undefined) {
-            user.isAdmin = isAdmin;
+            updateData.isAdmin = isAdmin;
         }
-        await user.save();
+
+        await directus.request(updateItem('Telemetry_Users', id, updateData));
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// Delete User
 app.delete('/api/admin/credentials/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        // Prevent deleting last admin?
-        const toDelete = await User.findByPk(id);
-        if (toDelete && toDelete.username === 'admin') {
+        const user = await directus.request(readItem('Telemetry_Users', id));
+        if (user && user.username === 'admin') {
             return res.status(400).json({ error: "Não é possível apagar o super-admin." });
         }
 
-        await User.destroy({ where: { id } });
+        await directus.request(deleteItem('Telemetry_Users', id));
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// Telemetry Logic
-// Telemetry Logic
 app.post('/api/telemetry', async (req, res) => {
     let payload = req.body;
 
-    // Debug Log
-    // console.log('📥 INCOMING TELEMETRY:', typeof payload, payload);
-
     if (typeof payload === 'string') {
-        try { payload = JSON.parse(payload); } catch (e) {
-            console.error("❌ JSON Parse Failed:", e);
-        }
+        try { payload = JSON.parse(payload); } catch (e) { }
     }
 
     const { userId, tabId, type, state } = payload;
     const ip = req.ip || req.socket.remoteAddress;
 
     if (!userId || !tabId) {
-        console.warn("⚠️ Rejected: Missing userId or tabId", payload);
         return res.status(400).json({ error: "Missing identity" });
     }
 
-    // Handle Graceful Shutdown
     if (type === 'shutdown' || state === 'TAB_PROBABLY_CLOSED') {
         await store.removeSession(userId, tabId);
         await notifyAdmins(userId, 'disconnected', { tabId });
@@ -364,16 +361,13 @@ app.post('/api/telemetry', async (req, res) => {
         return res.json({ success: true });
     }
 
-    // Update Session
     const stats = await store.upsertSession(userId, tabId, { ip, state, type });
     console.log(`📡 Update: ${userId} [${state}]`);
-
     await notifyAdmins(userId, 'update', { tabId, state, ip });
 
     res.json({ success: true });
 });
 
-// Logout
 app.post('/api/auth/logout', async (req, res) => {
     const { userId, tabId } = req.body;
     await store.removeSession(userId, tabId);
@@ -381,30 +375,36 @@ app.post('/api/auth/logout', async (req, res) => {
     res.json({ success: true });
 });
 
-// Admin Poller
 app.get('/api/admin/users', async (req, res) => {
     res.json(await store.getAllSessions());
 });
 
 app.get('/api/admin/history', async (req, res) => {
     try {
-        const logs = await TelemetryLog.findAll({
+        const logs = await directus.request(readItems('Telemetry_Logs', {
             limit: 200,
-            order: [['timestamp', 'DESC']],
-            include: [{ model: User, attributes: ['username'] }]
-        });
-        res.json(logs);
+            sort: ['-timestamp'],
+            fields: ['*', 'userId.username']
+        }));
+
+        const formattedLogs = logs.map(l => ({
+            ...l,
+            User: l.userId ? { username: l.userId.username } : null
+        }));
+
+        res.json(formattedLogs);
     } catch (e) {
         console.error("History Error:", e);
         res.status(500).json({ error: "Failed to fetch history" });
     }
 });
 
-// Check User Status
 app.get('/api/users/:userId/status', async (req, res) => {
     const { userId } = req.params;
     try {
-        const sessions = await Session.findAll({ where: { userId } });
+        const sessions = await directus.request(readItems('Telemetry_Sessions', {
+            filter: { userId: { _eq: userId } }
+        }));
 
         if (!sessions || sessions.length === 0) {
             return res.json({
@@ -415,7 +415,7 @@ app.get('/api/users/:userId/status', async (req, res) => {
         }
 
         const isFocused = sessions.some(s => s.state === 'FOCUSED');
-        const status = isFocused ? 'active' : 'online'; // active = focused tab, online = background/hidden
+        const status = isFocused ? 'active' : 'online';
 
         res.json({
             userId,
@@ -434,25 +434,18 @@ app.get('/api/users/:userId/status', async (req, res) => {
 });
 
 // ---- Swagger Setup ----
-// ---- Swagger Setup ----
-// Load swagger.json directly
 const swaggerSpec = require('./swagger.json');
-// Ensure server URL is dynamic based on port
 swaggerSpec.servers = [{ url: `http://localhost:${PORT}` }];
 
-// Optional token protection middleware
 function docsAuth(req, res, next) {
     const token = req.query.token || process.env.DOC_TOKEN;
-    if (token && token === 'public') return next(); // simple public token
+    if (token && token === 'public') return next();
     return res.status(403).send('Acesso negado à documentação');
 }
 
-// Serve swagger static assets (no auth)
 app.use('/api-docs', swaggerUi.serve);
-// Protect the swagger UI HTML page
 app.get('/api-docs', docsAuth, swaggerUi.setup(swaggerSpec));
 
-// Start server
 server.listen(PORT, () => {
-    console.log(`🚀 Persistent Server (SQLite) running on port ${PORT}`);
+    console.log(`🚀 Persistent Server (Directus backend) running on port ${PORT}`);
 });
