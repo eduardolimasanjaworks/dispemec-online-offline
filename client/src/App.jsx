@@ -13,7 +13,10 @@ const IconZap = () => <svg className="icon" viewBox="0 0 24 24"><polygon points=
 const IconShape = () => <svg className="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>;
 const IconLock = () => <svg className="icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>;
 
-const API_BASE = `http://${window.location.hostname}:3001/api`;
+// Determina o endpoint dinamicamente (Vite Localhost vs NGINX Docker)
+const IS_DEV = window.location.hostname === 'localhost';
+const API_BASE = IS_DEV ? 'http://localhost:3001/api' : '/api';
+const SOCKET_URL = IS_DEV ? 'http://localhost:3001' : '/';
 
 function App() {
   const [user, setUser] = useState(null); // { id, username, role }
@@ -171,7 +174,7 @@ function App() {
   useEffect(() => {
     if (user?.role === 'admin') {
       console.log("👑 Iniciando conexão Admin...");
-      const s = io(`http://${window.location.hostname}:3001`);
+      const s = io(SOCKET_URL);
 
       s.on('connect', () => {
         console.log("✅ Socket Conectado! ID:", s.id);
