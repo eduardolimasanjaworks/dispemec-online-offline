@@ -3,8 +3,13 @@ import { io } from "socket.io-client";
 // --- TELEMETRY UTILITY CLASS (Migrated) ---
 class TabMonitor {
     constructor(config) {
+        // Encontra a origem real ou cai pro padrão se tiver rodando fora do servidor Web
+        const backendOrigin = window.location.hostname === 'localhost'
+            ? 'http://localhost:3001'
+            : window.location.origin;
+
         this.config = {
-            endpoint: 'http://localhost:3001/api/telemetry',
+            endpoint: `${backendOrigin}/api/telemetry`,
             heartbeatInterval: 5000,
             ...config
         };
