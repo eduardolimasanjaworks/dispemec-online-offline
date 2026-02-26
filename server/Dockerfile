@@ -1,8 +1,7 @@
 # Backend Dockerfile
 FROM node:18-alpine
 
-# Instalar dependências do sistema
-RUN apk add --no-cache python3 make g++
+# Nenhuma dependência nativa a mais necessária para o Directus SDK
 
 # Criar diretório de trabalho
 WORKDIR /app
@@ -14,8 +13,7 @@ RUN npm ci --only=production
 # Copiar código fonte
 COPY . .
 
-# Criar diretório para o banco de dados
-RUN mkdir -p /app/data
+
 
 # Expor porta
 EXPOSE 3001

@@ -13,9 +13,8 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - DOC_TOKEN=public
-    volumes:
-      - ./server/data:/app/data
-      - db_data:/app/database # For the sqlite file
+      - DIRECTUS_URL=${DIRECTUS_URL:-http://91.99.137.101:8056/}
+      - DIRECTUS_TOKEN=${DIRECTUS_TOKEN:-UuazE-Np-VrpGxmqe-bEpysiTSjV8_YR}
     networks:
       - telemetry_network
 
@@ -35,6 +34,3 @@ services:
 networks:
   telemetry_network:
     driver: bridge
-
-volumes:
-  db_data:
