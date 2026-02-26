@@ -13,8 +13,8 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - DOC_TOKEN=public
-      - DIRECTUS_URL=${DIRECTUS_URL:-http://91.99.137.101:8056/}
-      - DIRECTUS_TOKEN=${DIRECTUS_TOKEN:-UuazE-Np-VrpGxmqe-bEpysiTSjV8_YR}
+      - DIRECTUS_URL=${DIRECTUS_URL}
+      - DIRECTUS_TOKEN=${DIRECTUS_TOKEN}
     networks:
       - telemetry_network
 
