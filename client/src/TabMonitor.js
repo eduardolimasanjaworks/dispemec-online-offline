@@ -1,12 +1,8 @@
-import { io } from "socket.io-client";
-
 // --- TELEMETRY UTILITY CLASS (Migrated) ---
 class TabMonitor {
     constructor(config) {
-        // Encontra a origem real ou cai pro padrão se tiver rodando fora do servidor Web
-        const backendOrigin = window.location.hostname === 'localhost'
-            ? 'http://localhost:3001'
-            : window.location.origin;
+        // Usa a mesma origem da página; em dev o Vite proxy redireciona /api para o backend.
+        const backendOrigin = window.location.origin;
 
         this.config = {
             endpoint: `${backendOrigin}/api/telemetry`,
@@ -21,6 +17,7 @@ class TabMonitor {
         }
 
         this.state = this._determineState();
+        this.sessionVersion = null;
         this.lastHeartbeat = Date.now();
         this.audioElement = null;
         this.socket = null;
@@ -28,7 +25,6 @@ class TabMonitor {
         // Bindings
         this._handleVisibility = this._handleVisibility.bind(this);
         this._heartbeatTick = this._heartbeatTick.bind(this);
-        this._handleUnload = this._handleUnload.bind(this);
         this._periodicTick = this._periodicTick.bind(this);
     }
 
@@ -43,13 +39,12 @@ class TabMonitor {
         document.addEventListener('visibilitychange', this._handleVisibility);
         window.addEventListener('focus', this._handleVisibility);
         window.addEventListener('blur', this._handleVisibility);
-        window.addEventListener('beforeunload', this._handleUnload);
 
         this.interval = setInterval(this._heartbeatTick, this.config.heartbeatInterval);
         this.periodicInterval = setInterval(this._periodicTick, 60000); // 60s History Log
 
         // Initial Ping
-        this._sendBeacon({ type: 'init', state: this.state });
+        return this._sendBeacon({ type: 'init', state: this.state });
     }
 
     stop() {
@@ -123,15 +118,11 @@ class TabMonitor {
     }
 
     _heartbeatTick() {
-        this._sendBeacon({ type: 'heartbeat', state: this.state });
+        this._sendBeacon({ type: 'heartbeat', state: this.state }).catch(() => {});
     }
 
     _periodicTick() {
-        this._sendBeacon({ type: 'periodic_log', state: this.state });
-    }
-
-    _handleUnload() {
-        this._sendBeacon({ type: 'shutdown', state: 'TAB_PROBABLY_CLOSED' });
+        this._sendBeacon({ type: 'periodic_log', state: this.state }).catch(() => {});
     }
 
     _generateFallbackUUID() {
@@ -142,13 +133,36 @@ class TabMonitor {
         });
     }
 
-    async _sendBeacon(data) {
+    _newOperationId() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        return this._generateFallbackUUID();
+    }
+
+    async _readResponseBody(response) {
+        const raw = await response.text();
+        if (!raw) return null;
+        try {
+            return JSON.parse(raw);
+        } catch (_ignored) {
+            return { rawText: raw };
+        }
+    }
+
+    async _sendBeacon(data, options = {}) {
+        const retryOnConflict = options.retryOnConflict !== false;
+        const operationId = options.operationId || this._newOperationId();
         const payload = {
             ...data,
             tabId: this.config.tabId,
             userId: this.config.userId,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            operationId
         };
+        if (this.sessionVersion !== null && this.sessionVersion !== undefined) {
+            payload.version = this.sessionVersion;
+        }
 
         // Use FETCH with keepalive instead of sendBeacon for better reliability and debugging
         try {
@@ -160,12 +174,57 @@ class TabMonitor {
             });
 
             if (!response.ok) {
-                console.error(`[TabMonitor] Server Error: ${response.status}`, await response.text());
-            } else {
-                // console.log('[TabMonitor] Beat sent', payload.state);
+                const errorBody = await this._readResponseBody(response);
+
+                if (response.status === 409 && retryOnConflict) {
+                    const conflictVersion = errorBody && errorBody.conflict ? Number(errorBody.conflict.currentVersion) : null;
+                    if (Number.isFinite(conflictVersion)) {
+                        this.sessionVersion = conflictVersion;
+                    }
+                    return this._sendBeacon(data, { retryOnConflict: false, operationId });
+                }
+
+                if (typeof this.config.onConnectivityChange === 'function') {
+                    this.config.onConnectivityChange('degraded', {
+                        httpStatus: response.status,
+                        eventType: data.type
+                    });
+                }
+
+                console.error(`[TabMonitor] Server Error: ${response.status}`, errorBody);
+                return false;
             }
+
+            const body = await this._readResponseBody(response);
+            if (body && Number.isFinite(Number(body.sessionVersion))) {
+                this.sessionVersion = Number(body.sessionVersion);
+            }
+            if (typeof this.config.onConnectivityChange === 'function') {
+                this.config.onConnectivityChange('online', { eventType: data.type });
+            }
+            return true;
         } catch (e) {
+            if (typeof this.config.onConnectivityChange === 'function') {
+                this.config.onConnectivityChange('offline-safe', {
+                    eventType: data.type,
+                    errorMessage: e && e.message ? e.message : String(e)
+                });
+            }
+            if (typeof this.config.onCriticalError === 'function') {
+                this.config.onCriticalError({
+                    level: 'error',
+                    eventType: 'tab_monitor_network_failure',
+                    message: 'Falha de rede em envio de telemetria',
+                    stack: e && e.stack ? e.stack : null,
+                    context: {
+                        eventType: data.type,
+                        tabId: this.config.tabId,
+                        userId: this.config.userId
+                    }
+                });
+            }
             console.error('[TabMonitor] Network Failure:', e);
+            return false;
         }
     }
 }

@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test \"tests/*.test.js\"",
+    "test:reliability": "node --test \"tests/*.test.js\"",
+    "test:reliability:seed": "set TEST_SEED=406164&& node --test \"tests/*.test.js\"",
+    "stress:dry": "node \"tests/stress.telemetry.js\" --dry-run",
+    "stress:run": "node \"tests/stress.telemetry.js\" --agents 120 --duration 300 --heartbeat 3000",
+    "stress:quick": "node \"tests/stress.telemetry.js\" --agents 40 --duration 20 --heartbeat 2000"
   },
   "keywords": [],
   "author": "",
@@ -12,6 +17,7 @@
   "dependencies": {
     "@directus/sdk": "^21.1.0",
     "body-parser": "^2.2.2",
+    "browser_telemetry": "file:..",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "pg": "^8.17.2",

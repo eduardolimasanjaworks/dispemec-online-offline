@@ -1,6 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import TabMonitor from './TabMonitor';
 import { io } from "socket.io-client";
+import { attachGlobalErrorHandlers, createClientErrorReporter } from './reliability/clientErrorReporter';
+import {
+  canStartDuty,
+  CONNECTION_MODES,
+  FAILURE_LOCK_THRESHOLD,
+  isLockableMode,
+  nextModeAfterConnectivity
+} from './reliability/connectivityPolicy';
 import './App.css';
 
 
@@ -16,18 +24,135 @@ const IconLock = () => <svg className="icon" viewBox="0 0 24 24"><rect x="3" y="
 // Determina o endpoint (Relativo para o build unificado no Docker)
 const API_BASE = '/api';
 const SOCKET_URL = '/';
+const STORAGE_AUTH_KEY = 'telemetry.auth.user';
+const STORAGE_DUTY_KEY = 'telemetry.duty.active';
+const STORAGE_TAB_ID_KEY_PREFIX = 'telemetry.tab.id.';
+const SOCKET_RECONNECT_OPTIONS = {
+  reconnection: true,
+  reconnectionAttempts: 5,
+  reconnectionDelay: 500,
+  reconnectionDelayMax: 5000,
+  randomizationFactor: 0.5,
+  timeout: 10000
+};
 
 function App() {
-  const [user, setUser] = useState(null); // { id, username, role }
+  const [user, setUser] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_AUTH_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !parsed.id || !parsed.username || !parsed.role) return null;
+      return parsed;
+    } catch (_e) {
+      return null;
+    }
+  }); // { id, username, role }
   const [isOnline, setIsOnline] = useState(false);
   const [monitor, setMonitor] = useState(null);
+  const [connectionMode, setConnectionMode] = useState(
+    nextModeAfterConnectivity(typeof navigator !== 'undefined' && navigator.onLine)
+  ); // online | degraded | offline-safe | locked
+  const [lockReason, setLockReason] = useState('');
+  const consecutiveFailuresRef = useRef(0);
+  const monitorRef = useRef(null);
+  const startInProgressRef = useRef(false);
+  const resumeAttemptedRef = useRef(false);
 
   // Admin State
   const [adminData, setAdminData] = useState({});
+  const [healthData, setHealthData] = useState(null);
+  const [healthGeneratedAt, setHealthGeneratedAt] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [activeTab, setActiveTab] = useState('realtime'); // 'realtime' | 'history' | 'credentials'
   const [socket, setSocket] = useState(null);
   const [usersData, setUsersData] = useState([]);
+  const usersById = useMemo(() => {
+    const map = {};
+    for (const u of usersData) {
+      if (u?.id) map[u.id] = u;
+    }
+    return map;
+  }, [usersData]);
+
+  const reportClientError = useMemo(() => createClientErrorReporter({
+    apiBase: API_BASE,
+    getUserId: () => user?.id || null
+  }), [user?.id]);
+
+  const applyConnectivityMode = (mode, reason = '') => {
+    if (mode === CONNECTION_MODES.ONLINE) {
+      consecutiveFailuresRef.current = 0;
+      setConnectionMode(CONNECTION_MODES.ONLINE);
+      setLockReason('');
+      return;
+    }
+
+    if (isLockableMode(mode)) {
+      consecutiveFailuresRef.current += 1;
+      if (consecutiveFailuresRef.current >= FAILURE_LOCK_THRESHOLD) {
+        setConnectionMode(CONNECTION_MODES.LOCKED);
+        setLockReason(reason || `Lock automático após ${FAILURE_LOCK_THRESHOLD} falhas consecutivas.`);
+        return;
+      }
+      setConnectionMode((prev) => (prev === CONNECTION_MODES.LOCKED ? prev : mode));
+      if (reason) setLockReason(reason);
+      return;
+    }
+
+    setConnectionMode(mode);
+    if (reason) setLockReason(reason);
+  };
+
+  const getTabStorageKey = (userId) => `${STORAGE_TAB_ID_KEY_PREFIX}${userId}`;
+  const getOrCreateStableTabId = (userId) => {
+    const key = getTabStorageKey(userId);
+    try {
+      const existing = sessionStorage.getItem(key);
+      if (existing) return existing;
+      const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      sessionStorage.setItem(key, generated);
+      return generated;
+    } catch (_e) {
+      return (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+  };
+
+  useEffect(() => {
+    const onOnline = () => {
+      applyConnectivityMode(CONNECTION_MODES.ONLINE);
+    };
+    const onOffline = () => {
+      applyConnectivityMode(CONNECTION_MODES.OFFLINE_SAFE, 'Sem conectividade de rede no navegador.');
+    };
+
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    return attachGlobalErrorHandlers(reportClientError);
+  }, [reportClientError]);
+
+  useEffect(() => {
+    try {
+      if (user) {
+        localStorage.setItem(STORAGE_AUTH_KEY, JSON.stringify(user));
+        return;
+      }
+      localStorage.removeItem(STORAGE_AUTH_KEY);
+    } catch (_e) {
+      // Falha de storage não pode bloquear o uso da aplicação.
+    }
+  }, [user]);
 
   // --- LOGIN ---
   const handleLogin = async (e) => {
@@ -40,11 +165,17 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
+      const rawBody = await res.text();
+      let data = {};
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch (_parseError) {
+        data = {};
+      }
       if (data.success) {
         setUser(data.user);
       } else {
-        alert(data.error || 'Erro ao fazer login');
+        alert(data.error || (res.ok ? 'Erro ao fazer login' : `Falha no login (${res.status})`));
       }
     } catch (err) {
       console.error("Login Error:", err);
@@ -76,6 +207,39 @@ function App() {
       if (res.ok) setUsersData(await res.json());
     } catch (e) {
       console.error("Erro ao carregar usuários", e);
+    }
+  };
+
+  const fetchAdminSessions = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/users`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setAdminData(data || {});
+    } catch (e) {
+      reportClientError({
+        level: 'warn',
+        eventType: 'admin_sessions_fetch_error',
+        message: 'Falha ao sincronizar sessões ativas por API'
+      });
+    }
+  };
+
+  const fetchHealth = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/health`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data?.success && data?.health) {
+        setHealthData(data.health);
+        setHealthGeneratedAt(data.generatedAt || null);
+      }
+    } catch (e) {
+      reportClientError({
+        level: 'warn',
+        eventType: 'admin_health_fetch_error',
+        message: 'Falha ao consultar métricas de saúde'
+      });
     }
   };
 
@@ -130,6 +294,12 @@ function App() {
     }
   }, [activeTab, user]);
 
+  useEffect(() => {
+    if (user?.role === 'admin') {
+      fetchUsers();
+    }
+  }, [user]);
+
   // --- LOGOUT ---
   const handleLogout = async () => {
     if (monitor) {
@@ -140,49 +310,187 @@ function App() {
     }
     setUser(null);
     setAdminData({});
+    try {
+      localStorage.removeItem(STORAGE_AUTH_KEY);
+      localStorage.removeItem(STORAGE_DUTY_KEY);
+    } catch (_e) {
+      // noop
+    }
   };
 
   // --- DUTY TOGGLE ---
-  const startDuty = () => {
-    // 1. Criar Monitor
-    const m = new TabMonitor({
-      userId: user.id
-    });
+  const startDuty = async () => {
+    if (!user?.id) return;
+    if (startInProgressRef.current) return;
+    if (monitorRef.current) return;
 
-    // 2. Ativar Proteção de Áudio (Hack)
-    m.enableKeepAlive();
+    if (connectionMode === CONNECTION_MODES.LOCKED) {
+      alert('Não foi possível iniciar agora. Aguarde alguns segundos e tente novamente.');
+      return;
+    }
+    if (!canStartDuty(connectionMode, navigator.onLine)) {
+      alert('Sem conexão no momento. Verifique sua internet e tente novamente.');
+      return;
+    }
 
-    // 3. Iniciar Rastreamento
-    m.start();
+    startInProgressRef.current = true;
+    try {
+      const stableTabId = getOrCreateStableTabId(user.id);
+      // 1. Criar Monitor
+      const m = new TabMonitor({
+        userId: user.id,
+        tabId: stableTabId,
+        onConnectivityChange: (mode, context) => {
+          const reason = mode === CONNECTION_MODES.OFFLINE_SAFE
+            ? 'Telemetria sem confirmação do servidor.'
+            : '';
+          applyConnectivityMode(mode, reason);
+          if (mode === CONNECTION_MODES.DEGRADED) {
+            reportClientError({
+              level: 'warn',
+              eventType: 'telemetry_degraded',
+              message: 'Canal de telemetria degradado',
+              context
+            });
+          }
+        },
+        onCriticalError: (errorPayload) => {
+          applyConnectivityMode(CONNECTION_MODES.OFFLINE_SAFE, 'Falha crítica na telemetria cliente-servidor.');
+          reportClientError(errorPayload);
+        }
+      });
 
-    setMonitor(m);
-    setIsOnline(true);
+      // 2. Ativar Proteção de Áudio (Hack)
+      m.enableKeepAlive();
+
+      // 3. Iniciar Rastreamento
+      const started = await m.start();
+      if (!started) {
+        m.stop();
+        applyConnectivityMode(CONNECTION_MODES.OFFLINE_SAFE, 'Não foi possível confirmar o início no servidor.');
+        alert('Não foi possível iniciar agora. O servidor não confirmou sua sessão.');
+        try {
+          localStorage.removeItem(STORAGE_DUTY_KEY);
+        } catch (_e) {
+          // noop
+        }
+        return;
+      }
+
+      monitorRef.current = m;
+      setMonitor(m);
+      setIsOnline(true);
+      applyConnectivityMode(CONNECTION_MODES.ONLINE);
+      try {
+        localStorage.setItem(STORAGE_DUTY_KEY, '1');
+      } catch (_e) {
+        // noop
+      }
+    } finally {
+      startInProgressRef.current = false;
+    }
   };
 
   const stopDuty = () => {
-    if (monitor) {
-      monitor.stop();
+    const activeMonitor = monitorRef.current || monitor;
+    if (activeMonitor) {
+      activeMonitor.stop();
       // Enviar evento final manual
-      monitor._sendBeacon({ type: 'shutdown', state: 'USER_STOPPED_TRACKING' });
+      activeMonitor._sendBeacon({ type: 'shutdown', state: 'USER_STOPPED_TRACKING' }).catch(() => {});
     }
+    monitorRef.current = null;
     setMonitor(null);
     setIsOnline(false);
+    try {
+      localStorage.removeItem(STORAGE_DUTY_KEY);
+      if (user?.id) {
+        sessionStorage.removeItem(getTabStorageKey(user.id));
+      }
+    } catch (_e) {
+      // noop
+    }
+  };
+
+  useEffect(() => {
+    if (!user) {
+      resumeAttemptedRef.current = false;
+      return;
+    }
+    if (resumeAttemptedRef.current || monitor || isOnline || startInProgressRef.current) return;
+    resumeAttemptedRef.current = true;
+    let mustResumeDuty = false;
+    try {
+      mustResumeDuty = localStorage.getItem(STORAGE_DUTY_KEY) === '1';
+    } catch (_e) {
+      mustResumeDuty = false;
+    }
+    if (mustResumeDuty) {
+      startDuty();
+    }
+  }, [user, monitor, isOnline]);
+
+  useEffect(() => {
+    return () => {
+      if (monitorRef.current) {
+        // Cleanup defensivo para evitar monitores duplicados (ex.: StrictMode em dev).
+        monitorRef.current.stop();
+        monitorRef.current = null;
+      }
+      startInProgressRef.current = false;
+    };
+  }, []);
+
+  const healthStatusLabel = (status) => {
+    if (status === 'critico') return 'Crítico';
+    if (status === 'degradado') return 'Degradado';
+    return 'Saudável';
   };
 
   // --- ADMIN SOCKET ---
   useEffect(() => {
     if (user?.role === 'admin') {
       console.log("👑 Iniciando conexão Admin...");
-      const s = io(SOCKET_URL);
+      const s = io(SOCKET_URL, SOCKET_RECONNECT_OPTIONS);
 
       s.on('connect', () => {
         console.log("✅ Socket Conectado! ID:", s.id);
         s.emit('join_admin');
+        fetchAdminSessions();
+      });
+
+      s.on('disconnect', (reason) => {
+        console.warn("⚠️ Socket desconectado:", reason);
+        applyConnectivityMode(CONNECTION_MODES.DEGRADED, 'Canal de atualização em tempo real desconectado.');
+      });
+
+      s.io.on('reconnect_attempt', (attempt) => {
+        console.warn(`🔁 Tentando reconectar socket (tentativa ${attempt})`);
+      });
+
+      s.io.on('reconnect', () => {
+        console.log("♻️ Socket reconectado, requisitando snapshot");
+        s.emit('join_admin');
+        applyConnectivityMode(CONNECTION_MODES.ONLINE);
+        fetchAdminSessions();
+      });
+
+      s.io.on('reconnect_error', (err) => {
+        console.error("❌ Erro de reconexão socket:", err?.message || err);
+        applyConnectivityMode(CONNECTION_MODES.DEGRADED, 'Falha de reconexão do canal em tempo real.');
+        reportClientError({
+          level: 'warn',
+          eventType: 'socket_reconnect_error',
+          message: err?.message || 'Falha na reconexão do canal em tempo real'
+        });
       });
 
       s.on('full_snapshot', (data) => {
         console.log("📥 Recebido Snapshot Completo:", data);
         setAdminData(data);
+      });
+
+      s.on('admin_watchdog_ping', ({ serverTs }) => {
+        s.emit('admin_watchdog_pong', { serverTs, clientTs: Date.now() });
       });
 
       s.on('session_update', ({ userId, eventType, data, timestamp }) => {
@@ -219,6 +527,22 @@ function App() {
       };
     }
   }, [user]);
+
+  useEffect(() => {
+    if (user?.role === 'admin' && activeTab === 'realtime') {
+      fetchHealth();
+      const interval = setInterval(fetchHealth, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [user, activeTab]);
+
+  useEffect(() => {
+    if (user?.role === 'admin' && activeTab === 'realtime') {
+      fetchAdminSessions();
+      const interval = setInterval(fetchAdminSessions, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [user, activeTab]);
 
   if (!user) {
     return (
@@ -293,8 +617,8 @@ function App() {
                 </h2>
                 <p style={{ margin: 0, opacity: 0.7, maxWidth: '400px' }}>
                   {isOnline
-                    ? "O monitoramento está ativo. O sistema de áudio está prevenindo a suspensão da aba."
-                    : "Inicie o plantão para habilitar as ferramentas de produtividade."}
+                    ? "Tudo certo. Pode trabalhar normalmente nesta aba."
+                    : "Clique no botão abaixo para informar que você está trabalhando."}
                 </p>
               </div>
               <div className={`status-dot ${isOnline ? 'online' : 'offline'}`} style={{ width: 20, height: 20 }}></div>
@@ -302,24 +626,14 @@ function App() {
 
             <div className="card-grid">
               <div className="card">
-                <h3><IconZap /> Ações Rápidas</h3>
-                <p>Controle o estado da sua sessão.</p>
-
-                {!isOnline ? (
-                  <button className="btn btn-primary btn-full" onClick={startDuty}>
-                    INICIAR PLANTÃO
-                  </button>
-                ) : (
-                  <button className="btn btn-secondary btn-full" onClick={stopDuty}>
-                    ENCERRAR PLANTÃO
-                  </button>
-                )}
-              </div>
-
-              <div className="card">
-                <h3><IconShield /> Diagnóstico</h3>
-                <p>Status da Conexão: <strong>Conectado</strong></p>
-                <p>Keep-Alive de Áudio: <strong>{isOnline ? 'Ativo' : 'Desligado'}</strong></p>
+                <h3><IconZap /> Meu Trabalho</h3>
+                <p>Use apenas este botão para iniciar ou encerrar sua sessão.</p>
+                <button
+                  className={`btn btn-full ${isOnline ? 'btn-secondary' : 'btn-primary'}`}
+                  onClick={isOnline ? stopDuty : startDuty}
+                >
+                  {isOnline ? 'PARAR DE TRABALHAR' : 'ESTOU TRABALHANDO'}
+                </button>
               </div>
             </div>
           </div>
@@ -333,13 +647,25 @@ function App() {
                 <h3><IconShape /> Sessões Ativas</h3>
                 <div style={{ fontSize: '36px', fontWeight: '700' }}>{Object.keys(adminData).length}</div>
               </div>
+              <div className="card">
+                <h3><IconShield /> Saúde do Sistema</h3>
+                <p>Status geral: <strong>{healthStatusLabel(healthData?.healthStatus)}</strong></p>
+                <p>Recomendação: <strong>{healthData?.recommendation || 'Aguardando dados de saúde.'}</strong></p>
+                <p>Latência média: <strong>{healthData?.latency?.avgMs ?? 0} ms</strong></p>
+                <p>Latência p95: <strong>{healthData?.latency?.p95Ms ?? 0} ms</strong></p>
+                <p>Conflitos (janela): <strong>{healthData?.telemetryConflictCount ?? 0}</strong></p>
+                <p>Sessões acima do SLA: <strong>{healthData?.sessionsOverSla ?? 0}</strong></p>
+                <p style={{ fontSize: '12px', color: '#777' }}>
+                  Atualizado em: {healthGeneratedAt ? new Date(healthGeneratedAt).toLocaleTimeString() : '--:--:--'}
+                </p>
+              </div>
             </div>
 
             <div className="table-container">
               <table>
                 <thead>
                   <tr>
-                    <th>Colaborador</th>
+                    <th>E-mail/Usuário</th>
                     <th>Status</th>
                     <th>Última Atividade</th>
                     <th>IP</th>
@@ -349,7 +675,9 @@ function App() {
                   {Object.entries(adminData).map(([uid, tabs]) => (
                     Object.entries(tabs).map(([tid, info]) => (
                       <tr key={tid}>
-                        <td style={{ fontWeight: 'bold' }}>{info.username || uid}</td>
+                        <td style={{ fontWeight: 'bold' }}>
+                          {((info.username && info.username !== 'Unknown') ? info.username : usersById[uid]?.username) || uid}
+                        </td>
                         <td>
                           {info.state === 'TAB_ACTIVE_FOCUSED' && <span style={{ color: '#00E676', fontWeight: 'bold' }}>Em Foco</span>}
                           {info.state === 'TAB_ACTIVE_HIDDEN' && <span style={{ color: '#FF1744', fontWeight: 'bold' }}>Oculto</span>}
@@ -390,7 +718,7 @@ function App() {
                         {new Date(log.timestamp).toLocaleString()}
                       </td>
                       <td style={{ fontWeight: 'bold' }}>
-                        {log.User ? log.User.username : log.userId.substring(0, 8)}
+                        {(log.User && log.User.username) || usersById[log.userId]?.username || log.userId.substring(0, 8)}
                       </td>
                       <td>
                         {log.eventType === 'periodic_log' && <span style={{ color: '#aaa', fontSize: '12px' }}>Minuto a Minuto</span>}

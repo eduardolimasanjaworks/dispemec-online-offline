@@ -79,7 +79,11 @@ app.post('/api/logout', (req, res) => {
 app.post('/api/telemetry', (req, res) => {
     let payload = req.body;
     if (typeof payload === 'string') {
-        try { payload = JSON.parse(payload); } catch (e) { }
+        try {
+            payload = JSON.parse(payload);
+        } catch (e) {
+            console.warn('[legacy server.js] payload invalido em /api/telemetry');
+        }
     }
 
     const { tabId, userId, type } = payload;

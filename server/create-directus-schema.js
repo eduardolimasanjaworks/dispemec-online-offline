@@ -86,6 +86,9 @@ async function run() {
             { field: 'ip', type: 'string' },
             { field: 'state', type: 'string' },
             { field: 'lastSeen', type: 'timestamp' },
+            { field: 'updatedAtServer', type: 'timestamp', schema: { default_value: 'CURRENT_TIMESTAMP' } },
+            { field: 'version', type: 'integer', schema: { default_value: 1 } },
+            { field: 'lastOperationId', type: 'string' },
             { field: 'deviceType', type: 'string' },
             { field: 'userAgent', type: 'text' },
             { field: 'startedAt', type: 'timestamp', schema: { default_value: 'CURRENT_TIMESTAMP' } }
@@ -136,6 +139,8 @@ async function run() {
             { field: 'tabId', type: 'uuid' },
             { field: 'state', type: 'string' },
             { field: 'eventType', type: 'string' },
+            { field: 'operationId', type: 'string' },
+            { field: 'requestId', type: 'string' },
             { field: 'timestamp', type: 'timestamp', schema: { default_value: 'CURRENT_TIMESTAMP' } }
         ];
 

@@ -1,0 +1,137 @@
+# VibeCode Ironclad Directives
+
+## Mission
+You are the primary engineer for this system. Your output MUST maximize consistency, fault tolerance, observability, and recoverability. Prefer safe progress over fast but fragile delivery.
+
+## Non-Negotiable Baselines
+- Server is the single source of truth for runtime state.
+- Every state mutation MUST be deterministic, idempotent, and auditable.
+- No silent failure is allowed. Every error path MUST produce structured logs.
+- Any unfinished reliability feature MUST be behind a feature flag with safe fallback.
+- Never break legacy behavior without an explicit compatibility bridge.
+
+## Modularization and Contextual Headers (Mandatory)
+- Split reliability logic into isolated modules (`ReliabilityManager`, `LoggingManager`, `StateReconciler`, `RetryPolicy`, `CircuitBreaker`).
+- Each module MUST own one concern and expose explicit contracts.
+- Every new file MUST start with a contextual header containing:
+  - Purpose
+  - Inputs/Outputs
+  - Invariants
+  - Failure modes
+  - Fallback behavior
+- Do not embed business rules in UI components when they belong to domain/service layers.
+
+## Advanced Architectural Principles (Never Forget)
+
+### 1) State Reconciliation Protocol
+- Client state is a projection only.
+- All real state transitions MUST be accepted/rejected by server version checks.
+- Use monotonic sequence/version (`seq`, `version`, `updatedAtServer`) in snapshots and deltas.
+- On mismatch, force reconcile (`full_snapshot` then replay safe deltas).
+- Never apply stale events over newer state.
+
+### 2) Idempotent Mutation Discipline
+- Every write operation MUST carry `operationId` (idempotency key).
+- Server MUST deduplicate retries by `operationId` + actor scope.
+- Retrying must produce same final state and never duplicate side effects (logs, inserts, counters).
+- Any endpoint without idempotency guarantees is considered unsafe.
+
+### 3) Semantic Integrity and Invariant Registry
+- Define invariants explicitly (example: one session per `tabId`, immutable identity fields, legal state transitions).
+- New modules MUST reuse existing invariants; they cannot redefine core semantics.
+- If a new requirement conflicts with an invariant, update the invariant registry first and migrate safely.
+- Introduce state machines for lifecycle transitions; reject invalid transitions by default.
+
+### 4) End-to-End Traceability
+- Every request/event MUST include `requestId`, `traceId`, `userId`, `tabId`, `featureFlagSet`.
+- Log causal chain for retries, fallback activation, breaker transitions, and reconciliation.
+- Persist logs to disk in structured format for post-mortem by AI.
+- No critical branch may run without trace context propagation.
+
+### 5) Memory and Runtime Hygiene (Persistent Browser)
+- All listeners, timers, sockets, intervals, and media contexts MUST have explicit teardown.
+- Never create duplicate intervals/sockets on rerender/reconnect.
+- Apply bounded queues, caps, and eviction policy for offline/event buffers.
+- Avoid unbounded object growth in client state; enforce pruning and TTLs.
+
+### 6) Failure Containment and Graceful Degradation
+- Use circuit breaker + timeout + exponential backoff with jitter on remote dependencies.
+- When server health is uncertain, UI MUST enter offline-safe or locked mode.
+- Prefer fail-closed for critical writes and fail-open only for non-critical telemetry reads.
+- Fallback paths MUST be tested and observable.
+
+### 7) Concurrency Safety by Design
+- No read-modify-write without version guard or atomic server primitive.
+- For contested entities, use optimistic locking with conflict detection and merge strategy.
+- Avoid race-prone patterns like `update then create in catch` for upsert.
+- Background cleanup jobs MUST verify freshness before delete.
+
+### 8) Temporal Correctness
+- Server time is authoritative for ordering and SLA metrics.
+- Client timestamps are hints only; never trusted for conflict resolution.
+- Clock skew and delayed packets must not corrupt final ordering.
+
+### 9) Performance and Backpressure
+- Define budgets: p95 latency, max queue depth, max retries, max snapshot size.
+- Implement request coalescing/debouncing where event storms are expected.
+- Apply backpressure policies before saturation causes cascading failures.
+
+### 10) Verification-First Integration
+- Build reliability modules in isolation, validate in sandbox, then integrate incrementally.
+- Ship in phases: integrity first, connection resilience second, edge cases third.
+- Stress and chaos scenarios are required gates before marking stable.
+
+## Logging and Diagnostics Requirements
+- Persist logs in `logs/app.log` and `logs/audit.log` with rotation/retention.
+- Maintain `logs/last-session-summary.txt` with operational health snapshot.
+- Structured fields required:
+  - `timestamp`, `level`, `service`, `requestId`, `traceId`
+  - `userId`, `tabId`, `operationId`, `eventType`, `action`
+  - `result`, `latencyMs`, `errorCode`, `errorMessage`, `retryCount`
+- Frontend critical errors MUST be forwarded to backend log pipeline.
+
+## Default Health Thresholds (Operational Baseline)
+- Health status MUST be classified as `saudavel`, `degradado`, or `critico` on every backend health snapshot.
+- Default latency thresholds:
+  - `degradado` when `p95 >= 150ms`
+  - `critico` when `p95 >= 300ms`
+- Default failure-rate thresholds:
+  - `degradado` when `failureRate >= 0.05`
+  - `critico` when `failureRate >= 0.15`
+- Default conflict-rate thresholds:
+  - `degradado` when `conflictRate >= 0.02`
+  - `critico` when `conflictRate >= 0.08`
+- Default heartbeat-SLA thresholds:
+  - `degradado` when `sessionsOverSla >= 1`
+  - `critico` when `sessionsOverSla >= 5`
+- Circuit breaker status MUST affect classification:
+  - `OPEN` => `critico`
+  - `HALF_OPEN` => at least `degradado`
+- The same thresholds MUST be configurable by environment variables, but defaults above are mandatory fallback.
+
+## Feature Flag Policy
+- Every high-risk behavior change MUST be flag-protected.
+- Flags MUST have owner, rollout plan, rollback criterion, and expiry date.
+- Default state for new critical flags in production: disabled.
+
+## Implementation Guardrails for This Project
+- Keep existing routes alive while introducing versioned reliability protocol.
+- Introduce compatibility layer before replacing legacy behavior.
+- Never remove existing telemetry paths until replacement is validated under load.
+- If uncertain, prefer explicit fallback and richer logging over silent assumptions.
+
+## Merge and Change Control
+- Small, reversible increments only.
+- One reliability concern per change set.
+- Every change MUST include:
+  - invariant impact
+  - failure-mode analysis
+  - observability impact
+  - rollback strategy
+
+## Absolute Prohibitions
+- No empty catches.
+- No hidden side effects in utility functions.
+- No global mutable state without ownership and synchronization strategy.
+- No endpoint that mutates state without idempotency policy.
+- No release without stress test evidence for concurrency and reconnection paths.

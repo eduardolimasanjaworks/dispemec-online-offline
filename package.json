@@ -4,7 +4,12 @@
   "description": "",
   "main": "tab-monitor.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm --prefix server run test",
+    "test:reliability": "npm --prefix server run test:reliability",
+    "test:reliability:seed": "npm --prefix server run test:reliability:seed",
+    "stress:dry": "npm --prefix server run stress:dry",
+    "stress:quick": "npm --prefix server run stress:quick",
+    "stress:run": "npm --prefix server run stress:run"
   },
   "keywords": [],
   "author": "",

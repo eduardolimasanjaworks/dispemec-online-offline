@@ -16,11 +16,11 @@ COPY . .
 
 
 # Expor porta
-EXPOSE 3001
+EXPOSE 8090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3001/api/admin/users', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD node -e "require('http').get('http://localhost:8090/api/admin/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
 # Comando de inicialização
 CMD ["node", "index.js"]
